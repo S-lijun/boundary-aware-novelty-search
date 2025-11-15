@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from .common_cnn import CommonCNN
+from models.common_cnn import CommonCNN
+
 
 class ValueNet(nn.Module):
     def __init__(self):

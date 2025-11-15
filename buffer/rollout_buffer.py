@@ -1,9 +1,11 @@
-import torch
+import numpy as np
 
 class RolloutBuffer:
-    def __init__(self, size, obs_dim, action_dim):
+    def __init__(self, size, obs_dim=None, action_dim=None):
         self.size = size
-        
+        self.reset_lists()
+
+    def reset_lists(self):
         self.observations = []
         self.actions = []
         self.rewards = []
@@ -22,4 +24,4 @@ class RolloutBuffer:
         self.values.append(value)
 
     def clear(self):
-        self.__init__(self.size, None, None)
+        self.reset_lists()

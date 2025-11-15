@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from .common_cnn import CommonCNN
+from models.common_cnn import CommonCNN
+
 
 class ICM(nn.Module):
     def __init__(self, action_dim, feature_dim=256):
