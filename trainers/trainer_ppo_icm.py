@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm  # type: ignore
 
 class PPO_ICM_Trainer:
     
