@@ -212,6 +212,9 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+import os
+
 
 
 class PPO_ICM_Trainer:
@@ -242,9 +245,22 @@ class PPO_ICM_Trainer:
         self.eta = eta
         self.device = device
 
+        # ========= FIXED DONE RIGHT =========
+        # trainer file path → trainers/
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        # project root → one level up
+        project_root = os.path.abspath(os.path.join(this_dir, ".."))
+        # logs/icm/ path
+        log_dir = os.path.join(project_root, "logs", "icm")
+        self.writer = SummaryWriter(log_dir=log_dir)
+        # ====================================
+
         self.policy_opt = torch.optim.Adam(agent.policy.parameters(), lr=policy_lr)
         self.value_opt = torch.optim.Adam(agent.value.parameters(), lr=value_lr)
         self.icm_opt = torch.optim.Adam(icm.parameters(), lr=icm_lr)
+
+ 
+
 
     # -----------------------------
     #   GAE Advantage
@@ -342,6 +358,12 @@ class PPO_ICM_Trainer:
                         episode_rewards.append(current_ep_reward)
                         episode_intrinsic.append(current_ep_intrinsic)
                         episode_lengths.append(current_ep_length)
+
+                            # ==== TensorBoard Logging ====
+                        self.writer.add_scalar("Reward/External", current_ep_reward, len(episode_rewards))
+                        self.writer.add_scalar("Reward/Intrinsic", current_ep_intrinsic, len(episode_intrinsic))
+                        self.writer.add_scalar("Reward/Total", current_ep_reward + current_ep_intrinsic, len(episode_rewards))
+                        self.writer.add_scalar("Episode/Length", current_ep_length, len(episode_lengths))
 
                         # reset episode stats
                         current_ep_reward = 0
