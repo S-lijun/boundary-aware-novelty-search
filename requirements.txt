@@ -6,7 +6,10 @@ numpy>=1.24.0
 
 # Reinforcement Learning Environments
 gymnasium>=0.29.0
+gym>=0.26.0  # procgen 可能需要旧版 gym
+shimmy>=0.2.0  # 用于将旧版 gym 环境转换为 gymnasium 格式
 minigrid>=2.0.0
+procgen>=0.10.0
 stable_baselines3>=2.0.0
 
 # Progress Bars

@@ -1,2 +1,3 @@
 boundary_ns_rl/.DS_Store
 boundary_ns_rl/logs/.DS_Store
+boundary_ns_rl/logs/procgen_maze_ppo_rnd/rnd_model.pt
