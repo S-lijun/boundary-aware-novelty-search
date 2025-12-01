@@ -10,8 +10,12 @@ from models.rnd import RND
 from agents.ppo_agent import PPOAgent
 from buffer.rollout_buffer import RolloutBuffer
 from trainers.trainer_ppo_rnd import PPO_RND_Trainer
+import time
 
-
+# -------- Path Fix: ensure project root is visible --------
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+sys.path.append(PROJECT_ROOT)
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,13 +45,19 @@ def main():
     )
 
     # -------- train --------
-    rewards = trainer.train(total_steps=30000)
+    results = trainer.train(total_steps=50000)
 
-    # -------- save results --------
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    save_path = os.path.join(project_root, "results", "minigrid_rnd_rewards.npy")
-    np.save(save_path, np.array(rewards))
-    print(f"[INFO] training done. Saved rewards to {save_path}")
+
+    # -------- Build ABSOLUTE SAVE PATH --------
+    results_dir = os.path.join(PROJECT_ROOT, "results", "rnd")
+    os.makedirs(results_dir, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(results_dir, f"minigrid_rnd_stats_{timestamp}.npy")
+
+    # -------- Save --------
+    np.save(save_path, results)
+    print(f"[INFO] Training done. Saved stats to {save_path}")
 
 if __name__ == "__main__":
     main()
