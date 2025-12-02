@@ -122,29 +122,51 @@ class RNDRewardWrapper(RewardWrapper):
         self.eta = eta
         self.device = device
         self.last_obs = None
-    
-    def reward(self, reward):
-        """
-        在环境奖励基础上添加 RND 内在奖励。
-        """
-        if self.last_obs is not None:
-            obs_tensor = torch.tensor(self.last_obs, dtype=torch.float32, device=self.device)
-            intrinsic_reward_tensor = self.rnd_model.compute_intrinsic_reward(obs_tensor)
-            intrinsic_reward = self.eta * intrinsic_reward_tensor.item()
-            return reward + intrinsic_reward
-        return reward
+        # 用于跟踪 episode 的 rewards
+        self.episode_external_reward = 0.0
+        self.episode_intrinsic_reward = 0.0
     
     def step(self, action):
         # gymnasium 新 API：5 个返回值
         obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # 先累加 external reward（无论是否有 last_obs）
+        self.episode_external_reward += reward
+        
+        # 计算 intrinsic reward（使用上一个观测）
+        intrinsic_reward = 0.0
+        if self.last_obs is not None:
+            obs_tensor = torch.tensor(self.last_obs, dtype=torch.float32, device=self.device)
+            intrinsic_reward_tensor = self.rnd_model.compute_intrinsic_reward(obs_tensor)
+            intrinsic_reward = self.eta * intrinsic_reward_tensor.item()
+            self.episode_intrinsic_reward += intrinsic_reward
+        
+        # 计算总奖励
+        total_reward = reward + intrinsic_reward
+        
+        # 更新 last_obs 为当前观测（用于下一个 step）
         self.last_obs = obs.copy()
-        reward = self.reward(reward)
-        return obs, reward, terminated, truncated, info
+        
+        # 如果 episode 结束，将 rewards 信息添加到 info 中
+        if terminated or truncated:
+            if not isinstance(info, dict):
+                info = {}
+            info['episode_external_reward'] = self.episode_external_reward
+            info['episode_intrinsic_reward'] = self.episode_intrinsic_reward
+            info['episode_total_reward'] = self.episode_external_reward + self.episode_intrinsic_reward
+            # 重置 episode rewards
+            self.episode_external_reward = 0.0
+            self.episode_intrinsic_reward = 0.0
+        
+        return obs, total_reward, terminated, truncated, info
     
     def reset(self, **kwargs):
         # gymnasium 新 API：2 个返回值
         obs, info = self.env.reset(**kwargs)
         self.last_obs = obs.copy()
+        # 重置 episode rewards
+        self.episode_external_reward = 0.0
+        self.episode_intrinsic_reward = 0.0
         return obs, info
 
 
@@ -354,6 +376,58 @@ class RNDTrainingCallback(BaseCallback):
         self.obs_buffer = []
 
 
+class RewardLoggingCallback(BaseCallback):
+    """
+    记录 episode intrinsic/external/total rewards 到 TensorBoard。
+    - episode_external_reward: 当前 episode 的 external reward（不累积）
+    - episode_intrinsic_reward: 当前 episode 的 intrinsic reward（不累积）
+    - total_reward_cumulative: 累积的 total reward（所有 episode 的总和）
+    """
+    
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.episode_count = 0
+        self.cumulative_total_reward = 0.0  # 累积的 total reward
+    
+    def _on_step(self) -> bool:
+        """
+        在每个 step 后检查是否有完成的 episode，并立即记录该 episode 的 rewards。
+        """
+        # 从 locals 中获取 infos（包含 episode 结束信息）
+        # 对于 vec_env，infos 是一个列表
+        infos = self.locals.get("infos", [])
+        
+        # 确保 infos 是列表格式
+        if not isinstance(infos, list):
+            infos = [infos] if infos is not None else []
+        
+        for info in infos:
+            if isinstance(info, dict):
+                # 检查是否有从 RNDRewardWrapper 传递的 episode rewards
+                # 注意：在 DummyVecEnv 中，episode 结束时的 info 可能被包装在 'episode' 键中
+                # 但我们的自定义键应该直接在 info 中
+                if 'episode_external_reward' in info:
+                    # 这些值已经是当前 episode 的总和（不是累积的）
+                    external = float(info['episode_external_reward'])
+                    intrinsic = float(info.get('episode_intrinsic_reward', 0.0))
+                    episode_total = external + intrinsic  # 当前 episode 的 total reward
+                    
+                    # 累积 total reward
+                    self.cumulative_total_reward += episode_total
+                    
+                    # 立即记录当前 episode 的值
+                    self.episode_count += 1
+                    self.logger.record("rollout/episode_external_reward", external)
+                    self.logger.record("rollout/episode_intrinsic_reward", intrinsic)
+                    self.logger.record("rollout/total_reward_cumulative", self.cumulative_total_reward)  # 累积值
+                    
+                    # 调试信息（前几个 episode）
+                    if self.episode_count <= 5:
+                        print(f"[DEBUG] Episode {self.episode_count}: external={external:.2f}, intrinsic={intrinsic:.2f}, total={episode_total:.2f}, cumulative={self.cumulative_total_reward:.2f}")
+        
+        return True
+
+
 def main():
     # ===== Minigrid 配置（已注释，保留用于参考） =====
     # env_id = "MiniGrid-DoorKey-5x5-v0"
@@ -423,6 +497,9 @@ def main():
         device=device,
         verbose=0,
     )
+    
+    # 4.5) 创建 reward 记录 callback
+    reward_logging_callback = RewardLoggingCallback(verbose=0)
 
     # 5) 定义 PPO 模型（使用 CnnPolicy 因为现在是图像输入）
     model = PPO(
@@ -442,11 +519,11 @@ def main():
         render=False,
     )
 
-    # 7) 训练（同时挂两个 callback）
+    # 7) 训练（同时挂三个 callback）
     total_timesteps = 200_000
     model.learn(
         total_timesteps=total_timesteps,
-        callback=[eval_callback, rnd_callback],
+        callback=[eval_callback, rnd_callback, reward_logging_callback],
         progress_bar=True,  # 需要安装 tqdm 和 rich
     )
 
