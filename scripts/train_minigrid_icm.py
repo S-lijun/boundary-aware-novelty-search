@@ -98,7 +98,7 @@ def main():
     )
 
     # -------- Train --------
-    results = trainer.train(total_steps=50000)
+    results = trainer.train(total_steps=20000)
 
     # -------- Build ABSOLUTE SAVE PATH --------
     results_dir = os.path.join(PROJECT_ROOT, "results", "icm")

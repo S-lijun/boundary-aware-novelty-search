@@ -45,7 +45,7 @@ def main():
     )
 
     # -------- train --------
-    results = trainer.train(total_steps=50000)
+    results = trainer.train(total_steps=20000)
 
 
     # -------- Build ABSOLUTE SAVE PATH --------
