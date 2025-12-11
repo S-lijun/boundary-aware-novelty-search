@@ -4,21 +4,26 @@ Boundary-aware Novelty Search (BANS) Model
 按照论文公式实现：
 1. Trajectory Embedding: b(τ)
 2. Boundary Detection: 识别轨迹中的边界状态
-3. Boundary-aware Novelty: N̂b(τ) = (1/k) * Σ_i d(b(τ_boundary), NN_i(b(τ_boundary); A))
-4. Normalization: N̂ = (N - median(N)) / (IQR(N) + ε)
-5. Reward Shaping: r''t = r_t^ext + β(st, t) N̂b(τ) - λc(st, at)
+3. Boundary-aware Novelty: N_b(τ) = (1/k) * Σ_i d(b(τ), NN_i(b(τ); A_safe))
+4. Normalization: Ñ = (N - median(N)) / (IQR(N) + ε)
+5. Reward Shaping: r''_t = r^ext_t + β(s_t, t) Ñ_b(τ) - λc(s_t, a_t)
+6. Lambda Update: λ ← [λ + η(E[c_t] - c̄)]_+
 """
 
 import numpy as np
 import torch
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 class BoundaryAwareNS:
     """
     Boundary-aware Novelty Search (BANS) 模型。
     
-    用于计算边界状态的新颖度，并提供奖励塑形功能。
+    按照论文实现：
+    - 使用 safe archive A_safe = {τ | C(τ) ≤ c̄}
+    - median-IQR 归一化
+    - 奖励公式：r''_t = r^ext_t + β(s_t, t) Ñ_b(τ) - λc(s_t, a_t)
+    - Lambda 自适应更新
     """
 
     def __init__(
@@ -27,8 +32,9 @@ class BoundaryAwareNS:
         archive_k: int = 10,
         boundary_threshold: float = 0.1,
         device: str = "cpu",
-        novelty_clip_min: Optional[float] = None,  # 新颖度下界，None表示不限制
-        novelty_clip_max: Optional[float] = None,  # 新颖度上界，None表示不限制
+        cost_threshold: float = 0.5,  # c̄: cost threshold for safe archive
+        lambda_init: float = 0.1,  # 初始 lambda 值
+        lambda_lr: float = 0.01,  # η: lambda 学习率
     ):
         """
         Args:
@@ -36,29 +42,35 @@ class BoundaryAwareNS:
             archive_k: k-nearest neighbors 的 k 值
             boundary_threshold: 边界检测阈值（观测变化率）
             device: 计算设备
-            novelty_clip_min: 归一化后新颖度的下界（默认None，允许负值）
-                            - 如果设为0.0，等价于ReLU
-                            - 如果设为-1.0，允许轻微负值但限制极端负值
-                            - 如果设为None，不限制下界
-            novelty_clip_max: 归一化后新颖度的上界（默认None，不限制上界）
+            cost_threshold: c̄，用于定义 safe archive 的 cost 阈值
+            lambda_init: 初始 lambda 值
+            lambda_lr: lambda 的学习率 η
         """
         self.feature_extractor = feature_extractor
         self.archive_k = archive_k
         self.boundary_threshold = boundary_threshold
         self.device = device
-        self.novelty_clip_min = novelty_clip_min
-        self.novelty_clip_max = novelty_clip_max
+        self.cost_threshold = cost_threshold
+        self.lambda_val = lambda_init
+        self.lambda_lr = lambda_lr
         
-        # Archive: 存储历史边界状态的 embedding
-        self.archive: List[np.ndarray] = []
+        # Archive: 存储所有轨迹的 embedding 和累积 cost
+        # 格式：[(z_boundary, cumulative_cost), ...]
+        self.archive: List[Tuple[np.ndarray, float]] = []
         
-        # Novelty history: 用于运行均值归一化（适配Maze环境）
+        # Safe archive: A_safe = {τ | C(τ) ≤ c̄}
+        self.safe_archive: List[np.ndarray] = []  # 只存储 embedding
+        
+        # Novelty history: 用于 median-IQR 归一化
         self.novelty_history: List[float] = []
         
-        # 运行统计（用于均值-标准差归一化，适配Maze环境）
-        self.novelty_mean = 0.0
-        self.novelty_std = 1.0
-        self.novelty_count = 0
+        # Cost history: 用于更新 lambda
+        self.cost_history: List[float] = []
+        self.episode_costs: List[float] = []  # 每个 episode 的累积 cost
+        
+        # Novelty clip（可选）
+        self.novelty_clip_min = None
+        self.novelty_clip_max = None
 
     def detect_boundary_states(self, obs_seq: np.ndarray) -> np.ndarray:
         """
@@ -132,118 +144,154 @@ class BoundaryAwareNS:
             z = z / norm
             return z
 
-    def compute_boundary_novelty(self, z_boundary: np.ndarray) -> float:
+    def compute_cost(self, obs_seq: np.ndarray, actions: np.ndarray) -> float:
         """
-        计算 boundary-aware novelty。
+        计算 cost 函数 c(s_t, a_t)。
         
-        公式：N(b(τ_boundary)) = (1/k) * Σ_i d(b(τ_boundary), NN_i(b(τ_boundary); A))
+        根据论文，cost 可以是：
+        - 违反安全约束的惩罚
+        - 能量消耗
+        - 其他需要限制的行为
         
-        Args:
-            z_boundary: (feature_dim,) 边界状态的 embedding
-        
-        Returns:
-            novelty: float，边界新颖度
-        """
-        if len(self.archive) == 0:
-            return 0.0
-        
-        A = np.array(self.archive)  # (N, dim)
-        dists = np.linalg.norm(A - z_boundary[None, :], axis=1)
-        k = min(self.archive_k, len(self.archive))
-        topk = np.partition(dists, k - 1)[:k]
-        return float(topk.mean())
-
-    def normalize_novelty(self, novelty: float) -> float:
-        """
-        运行均值-标准差归一化（适配Maze环境）。
-        
-        公式：N̂ = (N - mean(N)) / (std(N) + ε)
-        然后使用ReLU确保非负：N̂ = max(0, N̂)
-        
-        Args:
-            novelty: 原始新颖度值
-        
-        Returns:
-            novelty_hat: 归一化后的新颖度（>= 0）
-        """
-        if self.novelty_count == 0:
-            return 0.0
-        
-        # 归一化：n_norm = (n - mean) / (std + eps)
-        if self.novelty_count > 1 and self.novelty_std > 1e-8:
-            novelty_norm = (novelty - self.novelty_mean) / (self.novelty_std + 1e-8)
-        else:
-            novelty_norm = 0.0
-        
-        # ReLU确保非负（Maze环境关键：避免负奖励堆积）
-        novelty_hat = max(0.0, novelty_norm)
-        
-        return float(novelty_hat)
-
-    def compute_risk(self, obs_seq: np.ndarray, actions: np.ndarray) -> float:
-        """
-        计算探索风险 R(s) ∈ [0, 1]，用于BANS的乘法缩放。
-        
-        根据文档，Maze环境的risk包括：
-        1. Agent facing a wall: risk = 1.0
-        2. Agent in deadend: risk = 0.6
-        3. Agent stagnating: risk = 0.3
+        这里实现一个简化版本：基于风险行为（面向墙、死胡同、停滞）
         
         Args:
             obs_seq: (T+1, H, W, C) 观测序列
             actions: (T,) 动作序列
         
         Returns:
-            risk: float，风险值 [0, 1]
+            cost: float，累积 cost C(τ) = Σ_t c(s_t, a_t)
         """
         T = len(actions)
         if T == 0:
             return 0.0
         
-        risk = 0.0
+        cumulative_cost = 0.0
         
-        # Risk #1: Agent stagnating（长时间不前进）
-        # 检测最后10步的位置变化
-        if T >= 10:
-            # 使用观测的简单hash来检测位置变化
-            obs_start = obs_seq[max(0, T-10)].flatten()
-            obs_end = obs_seq[T].flatten()
-            # 计算观测差异
-            obs_diff = np.mean(np.abs(obs_start - obs_end))
-            if obs_diff < 0.01:  # 几乎没有变化
-                risk = max(risk, 0.3)
-        
-        # Risk #2: 重复动作过多（可能卡在墙边）
-        repeated_actions = 0
-        for t in range(1, T):
-            if actions[t] == actions[t - 1]:
-                repeated_actions += 1
-        repeat_ratio = repeated_actions / max(T, 1)
-        if repeat_ratio > 0.7:  # 70%以上动作重复
-            risk = max(risk, 0.6)  # deadend-like behavior
-        
-        # Risk #3: 检测是否面向墙（简化版：基于观测边缘的像素值）
-        # Procgen Maze中，墙通常是深色像素
-        # 检测观测中心区域（agent前方）是否有大量深色像素
-        last_obs = obs_seq[-1]  # (H, W, C)
-        if len(last_obs.shape) == 3:
-            H, W, C = last_obs.shape
-            # 检测中心区域（agent前方）
-            center_h_start, center_h_end = H // 3, 2 * H // 3
-            center_w_start, center_w_end = W // 2, W
-            center_region = last_obs[center_h_start:center_h_end, center_w_start:center_w_end, :]
+        # 计算每步的 cost（简化版：基于风险行为）
+        for t in range(T):
+            step_cost = 0.0
             
-            # 计算深色像素比例（假设墙是低亮度）
-            if C == 3:  # RGB
-                gray = np.mean(center_region, axis=2)
-                dark_ratio = np.sum(gray < 50) / gray.size  # 像素值 < 50 认为是墙
+            # Cost #1: 面向墙（高风险行为）
+            if t < len(obs_seq) - 1:
+                obs = obs_seq[t]
+                if len(obs.shape) == 3:
+                    H, W, C = obs.shape
+                    center_h_start, center_h_end = H // 3, 2 * H // 3
+                    center_w_start, center_w_end = W // 2, W
+                    center_region = obs[center_h_start:center_h_end, center_w_start:center_w_end, :]
+                    
+                    if C == 3:  # RGB
+                        gray = np.mean(center_region, axis=2)
+                        dark_ratio = np.sum(gray < 50) / gray.size
+                    else:
+                        dark_ratio = np.sum(center_region < 50) / center_region.size
+                    
+                    if dark_ratio > 0.5:  # 面向墙
+                        step_cost += 0.1
+            
+            # Cost #2: 重复动作（可能卡住）
+            if t > 0 and actions[t] == actions[t - 1]:
+                step_cost += 0.05
+            
+            cumulative_cost += step_cost
+        
+        return float(cumulative_cost)
+
+    def compute_boundary_novelty(self, z_boundary: np.ndarray, use_safe_archive: bool = True) -> float:
+        """
+        计算 boundary-aware novelty。
+        
+        论文公式：N_b(τ) = (1/k) * Σ_i d(b(τ), NN_i(b(τ); A_safe))
+        
+        Args:
+            z_boundary: (feature_dim,) 边界状态的 embedding
+            use_safe_archive: 是否使用 safe archive（默认 True）
+        
+        Returns:
+            novelty: float，边界新颖度
+        """
+        # 选择使用的 archive
+        if use_safe_archive:
+            archive_to_use = self.safe_archive
+        else:
+            # 如果没有 safe archive，使用普通 archive
+            archive_to_use = [z for z, _ in self.archive]
+        
+        if len(archive_to_use) == 0:
+            return 0.0
+        
+        A = np.array(archive_to_use)  # (N, dim)
+        dists = np.linalg.norm(A - z_boundary[None, :], axis=1)
+        k = min(self.archive_k, len(archive_to_use))
+        topk = np.partition(dists, k - 1)[:k]
+        return float(topk.mean())
+
+    def normalize_novelty(self, novelty: float) -> float:
+        """
+        Median-IQR 归一化（按照论文公式）。
+        
+        论文公式：Ñ = (N - median(N)) / (IQR(N) + ε)
+        
+        Args:
+            novelty: 原始新颖度值
+        
+        Returns:
+            novelty_hat: 归一化后的新颖度（允许负值）
+        """
+        if len(self.novelty_history) <= 1:
+            return 0.0
+        
+        # 计算 median 和 IQR
+        med = np.median(self.novelty_history)
+        q75 = np.percentile(self.novelty_history, 75)
+        q25 = np.percentile(self.novelty_history, 25)
+        iqr = q75 - q25
+        
+        if iqr < 1e-8:
+            # IQR 太小，使用相对比较
+            if med > 1e-8:
+                novelty_hat = float((novelty - med) / (med + 1e-8))
             else:
-                dark_ratio = np.sum(center_region < 50) / center_region.size
-            
-            if dark_ratio > 0.5:  # 50%以上是深色（可能是墙）
-                risk = max(risk, 1.0)  # facing wall
+                novelty_hat = 0.0
+        else:
+            novelty_hat = float((novelty - med) / (iqr + 1e-8))
         
-        return float(min(risk, 1.0))  # 确保在[0,1]范围内
+        # 改进：确保 novelty_hat 有一个最小值，避免完全为0
+        # 如果 novelty_hat 为负或0但 novelty > 0，给予一个小的基础值
+        if novelty_hat <= 0.0 and novelty > 0:
+            # 使用相对新颖度作为基础值
+            if len(self.novelty_history) > 1:
+                min_novelty = min(self.novelty_history)
+                max_novelty = max(self.novelty_history)
+                if max_novelty > min_novelty:
+                    relative_novelty = (novelty - min_novelty) / (max_novelty - min_novelty + 1e-8)
+                    novelty_hat = max(0.1, relative_novelty * 0.5)  # 至少 0.1，最多 0.5
+                else:
+                    novelty_hat = 0.1  # 基础值
+            else:
+                novelty_hat = 0.1  # 基础值
+        
+        # 可选：clip 到合理范围
+        if self.novelty_clip_min is not None:
+            novelty_hat = max(novelty_hat, self.novelty_clip_min)
+        if self.novelty_clip_max is not None:
+            novelty_hat = min(novelty_hat, self.novelty_clip_max)
+        
+        return float(novelty_hat)
+
+    def update_lambda(self, expected_cost: float):
+        """
+        更新 lambda（按照论文公式）。
+        
+        论文公式：λ ← [λ + η(E[c_t] - c̄)]_+
+        
+        Args:
+            expected_cost: E[c_t]，期望 cost（可以使用最近几个 episode 的平均 cost）
+        """
+        # λ ← [λ + η(E[c_t] - c̄)]_+
+        delta = self.lambda_lr * (expected_cost - self.cost_threshold)
+        self.lambda_val = max(0.0, self.lambda_val + delta)
 
     def process_episode(
         self,
@@ -263,9 +311,9 @@ class BoundaryAwareNS:
             result: dict，包含以下键：
                 - boundary_mask: (T,) bool array，边界状态掩码
                 - z_boundary: (feature_dim,) 边界 embedding
-                - novelty: float，原始新颖度
+                - novelty: float，原始新颖度（基于 safe archive）
                 - novelty_hat: float，归一化后的新颖度
-                - risk: float，探索风险 [0, 1]
+                - cumulative_cost: float，累积 cost C(τ)
         """
         # 1. 边界检测
         boundary_mask = self.detect_boundary_states(obs_seq)
@@ -273,91 +321,109 @@ class BoundaryAwareNS:
         # 2. 计算边界 embedding
         z_boundary = self.compute_boundary_embedding(obs_seq, boundary_mask)
         
-        # 3. 计算 boundary-aware novelty
-        novelty = self.compute_boundary_novelty(z_boundary)
+        # 3. 计算累积 cost
+        cumulative_cost = self.compute_cost(obs_seq, actions)
+        self.episode_costs.append(cumulative_cost)
         
-        # 4. 更新历史并归一化
+        # 4. 更新 safe archive：A_safe = {τ | C(τ) ≤ c̄}
+        # 先添加到普通 archive
+        if add_to_archive:
+            self.archive.append((z_boundary.astype(np.float32), cumulative_cost))
+            
+            # 如果 cost 低于阈值，添加到 safe archive
+            if cumulative_cost <= self.cost_threshold:
+                self.safe_archive.append(z_boundary.astype(np.float32))
+        
+        # 5. 计算 boundary-aware novelty（使用 safe archive）
+        novelty = self.compute_boundary_novelty(z_boundary, use_safe_archive=True)
+        
+        # 6. 更新历史并归一化
+        # 第一个 episode 特殊处理
+        if len(self.archive) == 1:
+            novelty = 1.0  # 给予基础值
+        
         self.novelty_history.append(novelty)
-        
-        # 使用Welford's online algorithm更新均值和标准差
-        self.novelty_count += 1
-        delta = novelty - self.novelty_mean
-        self.novelty_mean += delta / self.novelty_count
-        delta2 = novelty - self.novelty_mean
-        # 使用样本标准差
-        self.novelty_std = np.sqrt(
-            ((self.novelty_count - 1) * self.novelty_std**2 + delta * delta2) / max(self.novelty_count, 1)
-        )
-        
         novelty_hat = self.normalize_novelty(novelty)
         
-        # 5. 添加到 archive
-        if add_to_archive:
-            self.archive.append(z_boundary.astype(np.float32))
-        
-        # 6. 计算探索风险（用于BANS乘法缩放）
-        risk = self.compute_risk(obs_seq, actions)
+        # 7. 更新 lambda（使用最近几个 episode 的平均 cost）
+        if len(self.episode_costs) >= 10:
+            expected_cost = float(np.mean(self.episode_costs[-10:]))  # 最近10个episode的平均
+            self.update_lambda(expected_cost)
         
         return {
             "boundary_mask": boundary_mask,
             "z_boundary": z_boundary,
             "novelty": novelty,
             "novelty_hat": novelty_hat,
-            "risk": risk,
+            "cumulative_cost": cumulative_cost,
         }
 
     def compute_intrinsic_reward(
         self,
         obs_seq: np.ndarray,
         actions: np.ndarray,
-        alpha: float = 0.05,  # NS基础奖励系数（Maze推荐值）
-        beta: float = 0.25,  # BANS风险缩放系数
+        beta: float = 2.0,  # β(s_t, t)，论文中的权重因子
         episode_length: Optional[int] = None,
-    ) -> float:
+    ) -> Tuple[float, float]:
         """
-        计算BANS内在奖励（使用乘法缩放而非减法惩罚）。
+        计算BANS内在奖励（按照论文公式）。
         
-        公式：r_BANS = r_NS * (1 - β * R(s))
-        其中：r_NS = α * N̂b(τ) * T
+        论文公式：r''_t = r^ext_t + β(s_t, t) Ñ_b(τ) - λc(s_t, a_t)
         
-        这确保奖励永远 >= 0，且在危险区域降低NS强度。
+        注意：这里返回的是内在奖励部分：β(s_t, t) Ñ_b(τ) - λc(s_t, a_t)
+        以及每步的 cost 惩罚：λc(s_t, a_t)
         
         Args:
             obs_seq: (T+1, H, W, C) 观测序列
             actions: (T,) 动作序列
-            alpha: NS基础奖励系数（Maze推荐0.05）
-            beta: BANS风险缩放系数（推荐0.1-0.3）
-            episode_length: episode 长度（用于缩放奖励）。如果为 None，使用 actions 的长度
+            beta: β(s_t, t)，权重因子（论文中可能随时间/状态变化，这里简化为常数）
+            episode_length: episode 长度。如果为 None，使用 actions 的长度
         
         Returns:
-            intrinsic_reward: float，内在奖励（>= 0）
+            (intrinsic_reward, cost_penalty): 
+                - intrinsic_reward: β(s_t, t) Ñ_b(τ)（每步的奖励）
+                - cost_penalty: λc(s_t, a_t)（每步的惩罚）
         """
         result = self.process_episode(obs_seq, actions, add_to_archive=True)
         
         T = episode_length if episode_length is not None else len(actions)
         
-        # NS基础奖励：α * N̂b(τ) * T
-        r_ns = alpha * result["novelty_hat"] * T
+        # 论文公式：r''_t = r^ext_t + β(s_t, t) Ñ_b(τ) - λc(s_t, a_t)
+        # 内在奖励部分：β(s_t, t) Ñ_b(τ)
+        # 这里简化：β(s_t, t) = β（常数），每步加奖励
+        # 如果要在 episode 结束时加，可以乘以 T
+        novelty_bonus = beta * result["novelty_hat"]
         
-        # BANS缩放：r_BANS = r_NS * (1 - β * R(s))
-        # 确保 (1 - β * R(s)) >= 0，即 R(s) <= 1/β
-        # 由于 R(s) ∈ [0,1] 且 β ∈ [0.1, 0.3]，所以 1 - β * R(s) >= 0.7 > 0
-        risk_scale = 1.0 - beta * result["risk"]
-        risk_scale = max(0.0, risk_scale)  # 安全保护，确保非负
+        # Cost 惩罚部分：λc(s_t, a_t)
+        # 累积 cost 平均到每步
+        cost_per_step = result["cumulative_cost"] / max(T, 1)
+        cost_penalty = self.lambda_val * cost_per_step
         
-        intrinsic_reward = r_ns * risk_scale
+        # 每步的内在奖励（正值）和惩罚（负值）
+        intrinsic_reward_per_step = novelty_bonus - cost_penalty
         
-        return float(intrinsic_reward)
+        # 如果要在 episode 结束时一次性加，返回总和
+        intrinsic_reward_total = intrinsic_reward_per_step * T
+        
+        return float(intrinsic_reward_total), float(cost_penalty * T)
 
     def reset(self):
         """重置 archive 和历史记录（用于新的训练任务）。"""
         self.archive = []
+        self.safe_archive = []
         self.novelty_history = []
-        self.novelty_mean = 0.0
-        self.novelty_std = 1.0
-        self.novelty_count = 0
+        self.cost_history = []
+        self.episode_costs = []
+        self.lambda_val = 0.1  # 重置为初始值
 
     def get_archive_size(self) -> int:
         """返回 archive 的大小。"""
         return len(self.archive)
 
+    def get_safe_archive_size(self) -> int:
+        """返回 safe archive 的大小。"""
+        return len(self.safe_archive)
+
+    def get_lambda(self) -> float:
+        """返回当前的 lambda 值。"""
+        return self.lambda_val

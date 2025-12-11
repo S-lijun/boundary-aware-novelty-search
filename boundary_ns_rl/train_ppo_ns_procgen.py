@@ -194,20 +194,54 @@ class NSRewardWrapper(RewardWrapper):
                 z = self._compute_embedding(obs_seq)
                 novelty = self._compute_novelty(z)
                 
+                # 第一个episode特殊处理：给予基础新颖度值，避免0值影响统计
+                if len(self.archive) == 0:
+                    novelty = 1.0  # 给予一个非零的基础值
+                
                 # 更新历史
                 self.novelty_history.append(novelty)
                 self.archive.append(z.astype(np.float32))
                 
                 # median-IQR 归一化（按照论文）
-                if len(self.novelty_history) > 1:
+                # 改进：需要至少3个样本才能稳定归一化
+                if len(self.novelty_history) >= 3:
                     med = np.median(self.novelty_history)
                     iqr = np.percentile(self.novelty_history, 75) - np.percentile(self.novelty_history, 25)
-                    novelty_norm = (novelty - med) / (iqr + 1e-8)
+                    if iqr > 1e-6:  # 确保IQR足够大
+                        novelty_norm = (novelty - med) / (iqr + 1e-8)
+                    else:
+                        # IQR太小，使用相对比较
+                        novelty_norm = (novelty - med) / (med + 1e-8) if med > 1e-8 else 0.0
+                elif len(self.novelty_history) == 2:
+                    # 只有2个样本，使用简单比较
+                    prev_novelty = self.novelty_history[0]
+                    if novelty > prev_novelty:
+                        novelty_norm = (novelty - prev_novelty) / (prev_novelty + 1e-8)
+                    else:
+                        novelty_norm = 0.0
                 else:
                     novelty_norm = 0.0
                 
                 # ReLU确保非负（Maze环境关键：避免负奖励堆积）
                 novelty_hat = max(0.0, novelty_norm)
+                
+                # 改进：确保 novelty_hat 有一个最小值，避免完全为0
+                # 如果 novelty_hat 为 0 但 novelty > 0，给予一个小的基础值
+                if novelty_hat == 0.0 and novelty > 0:
+                    # 使用相对新颖度作为基础值
+                    if len(self.novelty_history) > 1:
+                        min_novelty = min(self.novelty_history)
+                        max_novelty = max(self.novelty_history)
+                        if max_novelty > min_novelty:
+                            relative_novelty = (novelty - min_novelty) / (max_novelty - min_novelty + 1e-8)
+                            novelty_hat = max(0.1, relative_novelty * 0.5)  # 至少 0.1，最多 0.5
+                        else:
+                            novelty_hat = 0.1  # 基础值
+                    else:
+                        novelty_hat = 0.1  # 基础值
+                
+                # 限制上界避免极端值
+                novelty_hat = min(novelty_hat, 5.0)
                 
                 # Reward shaping：alpha * novelty_hat * T
                 # alpha=0.05 是Maze环境的推荐值，确保奖励信号足够但不过大
@@ -358,7 +392,7 @@ def main():
             env_id, 
             feature_extractor=feature_extractor,
             archive_k=10,
-            beta=0.05,  # Maze环境推荐值：alpha=0.05，确保奖励信号足够但不过大
+            beta=20.0,  # NS奖励系数（进一步增加以匹配RND的奖励强度）
             device=device,
             novelty_clip_min=None,  # 使用ReLU，不再需要clip_min
             novelty_clip_max=None,  # 不限制上界
