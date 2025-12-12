@@ -35,6 +35,7 @@ class BoundaryAwareNS:
         cost_threshold: float = 0.5,  # c̄: cost threshold for safe archive
         lambda_init: float = 0.1,  # 初始 lambda 值
         lambda_lr: float = 0.01,  # η: lambda 学习率
+        lambda_max: Optional[float] = None,  # lambda 最大值限制（防止过度惩罚）
     ):
         """
         Args:
@@ -51,8 +52,10 @@ class BoundaryAwareNS:
         self.boundary_threshold = boundary_threshold
         self.device = device
         self.cost_threshold = cost_threshold
+        self.lambda_init = lambda_init  # 保存初始值，用于 reset
         self.lambda_val = lambda_init
         self.lambda_lr = lambda_lr
+        self.lambda_max = lambda_max  # lambda 最大值限制
         
         # Archive: 存储所有轨迹的 embedding 和累积 cost
         # 格式：[(z_boundary, cumulative_cost), ...]
@@ -188,11 +191,11 @@ class BoundaryAwareNS:
                         dark_ratio = np.sum(center_region < 50) / center_region.size
                     
                     if dark_ratio > 0.5:  # 面向墙
-                        step_cost += 0.1
+                        step_cost += 0.02  # 降低代价系数（从 0.1 降到 0.02）
             
             # Cost #2: 重复动作（可能卡住）
             if t > 0 and actions[t] == actions[t - 1]:
-                step_cost += 0.05
+                step_cost += 0.01  # 降低代价系数（从 0.05 降到 0.01）
             
             cumulative_cost += step_cost
         
@@ -292,6 +295,9 @@ class BoundaryAwareNS:
         # λ ← [λ + η(E[c_t] - c̄)]_+
         delta = self.lambda_lr * (expected_cost - self.cost_threshold)
         self.lambda_val = max(0.0, self.lambda_val + delta)
+        # 限制 lambda 的最大值（防止过度惩罚）
+        if self.lambda_max is not None:
+            self.lambda_val = min(self.lambda_val, self.lambda_max)
 
     def process_episode(
         self,
@@ -414,7 +420,8 @@ class BoundaryAwareNS:
         self.novelty_history = []
         self.cost_history = []
         self.episode_costs = []
-        self.lambda_val = 0.1  # 重置为初始值
+        # 重置为初始 lambda 值
+        self.lambda_val = self.lambda_init
 
     def get_archive_size(self) -> int:
         """返回 archive 的大小。"""
