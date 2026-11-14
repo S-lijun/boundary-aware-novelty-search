@@ -130,10 +130,74 @@ Checked-in Stable-Baselines3 scripts train for **200,000** steps. Procgen NS and
 
 ---
 
+## Reproduce
+
+Commands below are run from the repository root. `reproduce.py` starts the matching script with its working directory set to `boundary_ns_rl/`, so logs always land in `boundary_ns_rl/logs/`.
+
+### 1. Install
+
+Windows:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+```
+
+macOS or Linux:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Procgen compiles a native game library. On Windows that install needs a C++ build toolchain. MiniGrid and PyTorch do not.
+
+### 2. See the runs that can be repeated
+
+```powershell
+python reproduce.py list
+```
+
+| Command | Environment | Method | Training log |
+|---|---|---|---|
+| `python reproduce.py procgen-ppo` | Procgen-Maze | PPO | `boundary_ns_rl/logs/procgen_maze_ppo` |
+| `python reproduce.py procgen-icm` | Procgen-Maze | PPO+ICM | `boundary_ns_rl/logs/procgen_maze_ppo_icm` |
+| `python reproduce.py procgen-rnd` | Procgen-Maze | PPO+RND | `boundary_ns_rl/logs/procgen_maze_ppo_rnd` |
+| `python reproduce.py procgen-ns` | Procgen-Maze | PPO+NS, β = 20 | `boundary_ns_rl/logs/procgen_maze_ppo_ns` |
+| `python reproduce.py procgen-bans` | Procgen-Maze | PPO+B-NS, β = 20 | `boundary_ns_rl/logs/procgen_maze_ppo_bans` |
+| `python reproduce.py minigrid-ppo` | DoorKey-5×5 | PPO, `MlpPolicy` | `boundary_ns_rl/logs/minigrid_ppo_basic` |
+| `python reproduce.py minigrid-ns` | DoorKey-5×5 | PPO+NS, β = 0.01 | `boundary_ns_rl/logs/minigrid_ppo_ns` |
+| `python reproduce.py minigrid-bans` | DoorKey-5×5 | PPO+B-NS, β = 0.01 | `boundary_ns_rl/logs/minigrid_ppo_bans` |
+
+### 3. Train one run
+
+```powershell
+python reproduce.py procgen-bans
+```
+
+Replace `procgen-bans` with any name from the table. One command is one method on one environment, for 200,000 steps. Nothing in the repository launches all eight.
+
+When the run finishes, the policy is saved in that log directory (`ppo_*_final.zip`, plus `icm_model.pt` or `rnd_model.pt` for those two methods). Evaluation scores, if the callback writes them, are under `eval/` in the same directory. The curves in `Final Results/` are the course figures; a new run does not overwrite them.
+
+### 4. Open the log
+
+```powershell
+python -m tensorboard.main --logdir boundary_ns_rl/logs --port 6006
+```
+
+Then open `http://localhost:6006`.
+
+DoorKey has no ICM or RND command. Those two methods are the Procgen commands above. `minigrid-ppo` flattens the symbolic observation and uses `MlpPolicy`. `minigrid-ns` and `minigrid-bans` use 64×64 RGB and `CnnPolicy`, so the three DoorKey runs do not share an observation pipeline. `boundary_ns_rl/train_ppo_ns.py` is an older script and is not part of this list. `scripts/train_minigrid_*.py` trains a separate custom PPO stack on `MiniGrid-Empty-8x8` for 20,000 steps.
+
+---
+
 ## Repository
 
 ```
 .
+├── reproduce.py             # python reproduce.py list
 ├── requirements.txt
 ├── Final Results/           # cumulative curves used in the README
 ├── boundary_ns_rl/          # Stable-Baselines3 experiments (the study above)
@@ -155,42 +219,7 @@ Checked-in Stable-Baselines3 scripts train for **200,000** steps. Procgen NS and
 ├── agents/  buffer/  envs/  trainers/
 ```
 
-`models/boundary_aware_ns.py` is the B-NS archive, novelty score, and cost penalty. The `boundary_ns_rl/train_ppo_*` scripts are the training entry points for the two environments in this study.
-
-### Install
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-The stack is PyTorch, Gymnasium, MiniGrid, Procgen, and Stable-Baselines3. Procgen installs a native game package; on Windows that step needs a working build toolchain.
-
-### Run
-
-From `boundary_ns_rl`, so local imports resolve and logs land in `boundary_ns_rl/logs/`:
-
-```bash
-cd boundary_ns_rl
-
-python train_ppo_procgen.py          # PPO
-python train_ppo_icm.py              # PPO + ICM
-python train_ppo_rnd.py              # PPO + RND
-python train_ppo_ns_procgen.py       # PPO + NS
-python train_ppo_bans_procgen.py     # PPO + B-NS
-
-python train_ppo_minigrid_basic.py   # DoorKey, vanilla PPO
-python train_ppo_ns_minigrid.py      # DoorKey, PPO + NS
-python train_ppo_bans_minigrid.py    # DoorKey, PPO + B-NS
-```
-
-DoorKey ICM and RND are not separate active launchers; the maintained ICM and RND scripts train Procgen-Maze. The DoorKey vanilla PPO script uses an `MlpPolicy` on a flattened full observation. DoorKey NS and B-NS use a `CnnPolicy` on 64×64 RGB. Those three DoorKey runs are therefore not the same observation pipeline.
-
-The `scripts/train_minigrid_*.py` entry points are an earlier custom PPO, ICM, and RND stack on `MiniGrid-Empty-8x8` for 20,000 steps. They are not the DoorKey or Procgen comparisons above.
-
-Each SB3 script writes TensorBoard logs under `./logs/` and saves a final policy next to them. No trained checkpoints are stored in the repository.
+`models/boundary_aware_ns.py` is the B-NS archive, novelty score, and cost penalty. Training is started from the repository root with `reproduce.py`, which calls the matching file in `boundary_ns_rl/`.
 
 ---
 

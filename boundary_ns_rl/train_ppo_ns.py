@@ -115,6 +115,16 @@ def make_env(env_id: str):
 
 
 def main():
+    # Stable-Baselines3 stores the reward before this script's callback runs,
+    # so the novelty term never reaches PPO. The runnable DoorKey NS entry point
+    # is train_ppo_ns_minigrid.py (python reproduce.py minigrid-ns).
+    if os.environ.get("RUN_LEGACY_NS") != "1":
+        raise SystemExit(
+            "train_ppo_ns.py is a legacy entry point and does not train PPO with the novelty bonus.\n"
+            "From the repository root, run:\n"
+            "  python reproduce.py minigrid-ns"
+        )
+
     env_id = "MiniGrid-DoorKey-5x5-v0"
     log_dir = "./logs/minigrid_ppo_ns"
     os.makedirs(log_dir, exist_ok=True)

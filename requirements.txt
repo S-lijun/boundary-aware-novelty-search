@@ -11,6 +11,7 @@ shimmy>=0.2.0  # 用于将旧版 gym 环境转换为 gymnasium 格式
 minigrid>=2.0.0
 procgen>=0.10.0
 stable_baselines3>=2.0.0
+tensorboard>=2.14.0
 
 # Progress Bars
 tqdm>=4.65.0
