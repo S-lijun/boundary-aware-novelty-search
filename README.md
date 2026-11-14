@@ -39,50 +39,52 @@ Prediction-error curiosity (ICM, RND) pays the agent for transitions the model d
 
 ## Three findings
 
-The comparisons below are the reported single-run results of the course study. The result images are not in this repository, so each finding is summarized directly. They are observations about these environments and budgets, not a claim that one bonus is best in general.
+Each curve is one training run. Plots titled “total reward” are the running sum of the reward used in training. On Procgen-Maze the environment itself pays 0 or 10, so a curve on the order of 10<sup>6</sup> is dominated by the intrinsic term.
 
 ### 1. When does novelty help?
 
-Novelty is not uniformly better. It depends on the environment and on how long the agent is trained.
+On the shorter MiniGrid comparison, prediction-error bonuses pull away and both novelty methods stay near zero. On the 200,000-step novelty runs, NS and B-NS both accumulate reward, and B-NS finishes slightly ahead.
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-**MiniGrid-DoorKey-5×5**
+<img src="Final%20Results/minigrid_cumulative_results.png" alt="MiniGrid cumulative reward for all five methods" width="100%">
 
-Within 20,000 steps, ICM and RND obtain external reward sooner. NS and B-NS initially receive little external reward.
-
-Extended to 200,000 steps, both novelty methods start to collect external reward.
+*MiniGrid-DoorKey-5×5, shorter run. ICM finishes highest, then RND, then PPO. NS and B-NS stay flat.*
 
 </td>
 <td width="50%" valign="top">
 
-**Procgen-Maze**
+<img src="Final%20Results/200k_minigrid_total_reward.png" alt="MiniGrid 200k cumulative reward for NS and B-NS" width="100%">
 
-With a 200,000-step budget, novelty-driven agents become competitive and outperform several prediction-error and vanilla baselines.
+*Same environment, 200,000-step novelty runs. Both curves rise. B-NS starts later and ends just above NS.*
 
 </td>
 </tr>
 </table>
 
-> **Takeaway.** Trajectory-level novelty is sensitive to environmental structure and to the training budget. A short MiniGrid run favors prediction error; the reported Procgen runs give novelty more room.
+> **Takeaway.** Trajectory-level novelty is sensitive to the environment and the training budget. The short MiniGrid run favors ICM and RND. The longer novelty runs do collect reward, but this plot does not include PPO, ICM, or RND.
 
 ### 2. Can novelty search be structured?
 
-Standard NS rewards a trajectory for being far from everything stored so far. B-NS stores only feasible trajectories and shapes the bonus with a cost penalty.
+Standard NS rewards a trajectory for being far from everything stored so far. B-NS keeps neighbors only from the feasible archive and subtracts a cost penalty. Those two changes were used together, so this plot does not separate them.
 
-In the reported Procgen-Maze run, B-NS reaches a higher cumulative external reward than standard NS, and later passes PPO+RND.
+<img src="Final%20Results/procgen_total_reward.png" alt="Procgen-Maze cumulative training reward for five methods" width="80%">
 
-The archive rule and the cost penalty were used together. This comparison does not isolate pixel-level boundary detection from the cost term.
+*Procgen-Maze. Cumulative training reward: B-NS ends above NS, and crosses RND late in the run. PPO stays near zero and ICM rises slowly. Because the vertical axis is about 10<sup>6</sup>, this is not a count of solved mazes.*
 
-> **Takeaway.** Restricting novelty to a feasible archive, and charging for costly behavior, coincided with stronger task reward than unstructured NS. Which of those two changes caused the gain is still open.
+> **Takeaway.** In this Procgen run, feasibility-aware novelty shaping produced a larger cumulative training return than standard NS. That return is mostly the intrinsic bonus.
 
 ### 3. How large should the novelty bonus be?
 
-On Procgen-Maze, B-NS was run with novelty coefficients β = 5 and β = 20. The β = 20 run reaches a substantially higher cumulative external reward.
+On Procgen-Maze, B-NS was run at β = 5 and β = 20. The larger coefficient produces a much larger cumulative training return. It is a better setting for that summed curve, not a universal optimum.
 
-> **Takeaway.** The scale of the novelty bonus changes whether exploration shows up in task reward. β = 20 is a better setting in this Procgen comparison, not a universal optimum.
+<img src="Final%20Results/parameters_tuning_total_reward.png" alt="Procgen B-NS cumulative reward at beta 5 and beta 20" width="80%">
+
+*B-NS on Procgen-Maze. β = 20 accounts for almost the entire cumulative gap. β = 5 stays near the axis.*
+
+> **Takeaway.** The novelty coefficient has to be large enough to move the training signal. β = 20 does that here. The same plot does not show that the larger bonus solved more mazes.
 
 ---
 
@@ -133,6 +135,7 @@ Checked-in Stable-Baselines3 scripts train for **200,000** steps. Procgen NS and
 ```
 .
 ├── requirements.txt
+├── Final Results/           # cumulative curves used in the README
 ├── boundary_ns_rl/          # Stable-Baselines3 experiments (the study above)
 │   ├── train_ppo_procgen.py
 │   ├── train_ppo_icm.py
@@ -193,12 +196,7 @@ Each SB3 script writes TensorBoard logs under `./logs/` and saves a final policy
 
 ## Report and contributors
 
-This tree does not include the course report, result figures, or an author list. There is no preprint, venue, or DOI to cite. The four figures used in the original write-up are not present here:
-
-- `minigrid_cumulative_results.png`
-- `200k_minigrid_total_reward.png`
-- `procgen_total_reward.png`
-- `parameters_tuning_total_reward.png`
+The cumulative curves are in `Final Results/`. This tree does not include the course report or an author list, and there is no preprint, venue, or DOI to cite.
 
 ---
 
